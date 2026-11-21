@@ -44,6 +44,43 @@ The platform runs an autonomous multi-agent swarm that turns natural-language pr
 
 ---
 
+## Application Walkthrough & Visual Tour
+
+### 1. Zero-Trust Access Control & Role Governance
+Enterprise authentication gate enforcing role-based access control (Principal Architect, Compliance Officer, Requirements Engineer, Security Analyst) with PostgreSQL-backed session persistence.
+
+![Authentication & RBAC Portal](assets/screenshots/01_login_portal.png)
+
+---
+
+### 2. Autonomous Multi-Agent Swarm Workspace
+ChatGPT-style dark-mode interface featuring financial domain prompt templates, document ingestion (PDF, DOCX, TXT), active chat history, and runtime model telemetry.
+
+![Main Dashboard & Multi-Agent Interface](assets/screenshots/02_main_dashboard.png)
+
+---
+
+### 3. Statutory Risk Scoring & Multi-Agent Trace
+Calculates statutory financial risk (0–100), establishes MoSCoW priority baselines, and traces multi-agent execution across Zero-Trust Guardrails and Qdrant statutory RAG search (3,119 indexed circular chunks).
+
+![Statutory Requirements & Swarm Status](assets/screenshots/03_statutory_requirements_breakdown.png)
+
+---
+
+### 4. 6-Pillar Modular Architectural Decomposition
+Decomposes unstructured project descriptions into at least 30 modular specifications across all 6 core engineering pillars, annotated with statutory circular citations (RBI, NPCI, SEBI, DPDP) and testable acceptance criteria.
+
+![Architectural 6 Pillars Decomposition](assets/screenshots/04_architectural_6_pillars.png)
+
+---
+
+### 5. Fine-Tuned SDLC Governance & Stage-Gate Decisioning
+Fine-tuned 4-bit LoRA adapter (`unsloth/Qwen2.5-3B-Instruct`) evaluating 10 SDLC methodologies, detailing architectural rationale, evaluating alternatives, and providing human-in-the-loop stage gates with downloadable sovereign SRS PDF reports.
+
+![Fine-Tuned SDLC Governance](assets/screenshots/05_fine_tuned_sdlc_recommendation.png)
+
+---
+
 ## Architecture
 
 ```
