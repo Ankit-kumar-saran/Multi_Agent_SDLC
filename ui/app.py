@@ -816,13 +816,13 @@ if st.session_state.authenticated_user is None:
 # CHATGPT-STYLE MINIMALIST SIDEBAR (PostgreSQL Integrated)
 # -----------------------------------------------------------------------------
 with st.sidebar:
-    u = st.session_state.authenticated_user
+    u = st.session_state.authenticated_user or {}
     st.markdown("### Agentic RE-SDLC")
     st.markdown(
         f"<div style='background:#1c1c1f; padding:8px 12px; border-radius:8px; border:1px solid #2a2a2e; margin-bottom:12px; font-size:12px;'>"
-        f"<b>{u.get('full_name')}</b><br>"
-        f"<span style='color:#888;'>{u.get('email')}</span><br>"
-        f"<span style='color:#4ade80;'>{u.get('role')}</span>"
+        f"<b>{u.get('full_name', 'Guest')}</b><br>"
+        f"<span style='color:#888;'>{u.get('email', '')}</span><br>"
+        f"<span style='color:#4ade80;'>{u.get('role', '')}</span>"
         f"</div>",
         unsafe_allow_html=True
     )
