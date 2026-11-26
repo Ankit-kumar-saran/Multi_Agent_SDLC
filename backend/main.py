@@ -1,21 +1,18 @@
 # backend/main.py
-"""FastAPI backend for Agentic RE‑SDLC system with fine-tuned models & RAG.
-"""
+"""FastAPI backend for the lightweight Gemini + RAG Agentic RE-SDLC system."""
 
 import os
 import uuid
-from typing import List, Dict, Any, Optional
-from fastapi import FastAPI, HTTPException, Path, Body, UploadFile, File
+from typing import Any, Dict, List, Optional
+from fastapi import Body, FastAPI, File, HTTPException, Path, UploadFile
 from pydantic import BaseModel
 
-app = FastAPI(title="Agentic RE‑SDLC Backend")
+app = FastAPI(title="Agentic RE-SDLC Backend")
 
-# In‑memory stores
 SESSIONS: Dict[str, Dict[str, Any]] = {}
 REQUIREMENTS: Dict[str, Dict[str, Any]] = {}
 SDLC_RECOMMENDATIONS: Dict[str, Dict[str, Any]] = {}
 APPROVALS: List[Dict[str, Any]] = []
-ARTEFACTS: Dict[str, Dict[str, Any]] = {}
 
 
 class CreateSessionResponse(BaseModel):
@@ -27,8 +24,13 @@ class MessageRequest(BaseModel):
 
 
 class ApprovalRequest(BaseModel):
-    action: str  # "approve", "reject", "modify"
+    action: str
     comment: Optional[str] = None
+
+
+class CritiqueRequest(BaseModel):
+    chosen_model: str
+    human_feedback: Optional[str] = ""
 
 
 @app.post("/session", response_model=CreateSessionResponse)
@@ -40,12 +42,12 @@ def create_session():
 
 @app.post("/upload")
 async def upload_document(file: UploadFile = File(...)):
-    filename = file.filename
+    filename = os.path.basename(file.filename or "document.txt")
     ext = os.path.splitext(filename)[1].lower()
-    if ext not in [".docx", ".pdf", ".txt", ".md"]:
+    if ext not in (".docx", ".pdf", ".txt", ".md"):
         raise HTTPException(status_code=400, detail=f"Unsupported file format: {ext}")
 
-    save_dir = os.path.join("data", "indian_docx")
+    save_dir = os.path.join("data", "uploads")
     os.makedirs(save_dir, exist_ok=True)
     file_path = os.path.join(save_dir, filename)
 
@@ -53,10 +55,10 @@ async def upload_document(file: UploadFile = File(...)):
     with open(file_path, "wb") as out:
         out.write(content)
 
-    # Trigger RAG auto-ingestion
+    chunks_ingested = 0
     try:
-        from rag.ingest import main as ingest_main
-        ingest_main()
+        from rag.ingest import ingest_file
+        chunks_ingested = ingest_file(file_path, category="uploads")
     except Exception as exc:
         print(f"[WARN] Auto-ingestion warning: {exc}")
 
@@ -64,7 +66,8 @@ async def upload_document(file: UploadFile = File(...)):
         "status": "success",
         "filename": filename,
         "filepath": file_path,
-        "message": "Document saved to data/indian_docx and ingested into RAG store."
+        "chunks_ingested": chunks_ingested,
+        "message": "Document saved to data/uploads and indexed in Qdrant.",
     }
 
 
@@ -79,39 +82,54 @@ def post_message(
     user_text = payload.content
     SESSIONS[session_id]["messages"].append({"role": "user", "content": user_text})
 
-    # 1. Detailed Requirements Analysis & Compliance Mapping
-    analysis_data = {}
     pdf_path = "output/requirements_analysis.pdf"
     try:
-        from requirements_analysis import analyze_requirement
         from pdf_generator import generate_pdf_report
+        from requirements_analysis import analyze_requirement
 
         analysis_data = analyze_requirement(user_text)
+
+        if analysis_data.get("is_conversational"):
+            reply = analysis_data.get("conversational_response", "")
+            SESSIONS[session_id]["messages"].append({"role": "assistant", "content": reply})
+            return {"response": reply, "requirements": None}
+
+        if analysis_data.get("is_security_violation"):
+            reply = analysis_data.get("security_rejection_response", "Blocked by security guardrails.")
+            SESSIONS[session_id]["messages"].append({"role": "assistant", "content": reply})
+            return {"response": reply, "requirements": None}
+
+        if analysis_data.get("is_out_of_domain"):
+            reply = analysis_data.get("domain_rejection_response", "Outside financial domain scope.")
+            SESSIONS[session_id]["messages"].append({"role": "assistant", "content": reply})
+            return {"response": reply, "requirements": None}
+
         generate_pdf_report(analysis_data, pdf_path)
         REQUIREMENTS[session_id] = {
             "status": "pending_approval",
-            "requirement": user_text,
+            "requirement": analysis_data.get("original_requirement", user_text),
             "analysis": analysis_data,
-            "pdf_path": pdf_path
+            "pdf_path": pdf_path,
         }
+        req_count = len(analysis_data.get("requirements_list", []))
+        response_text = (
+            f"Extracted {req_count} requirements for '{analysis_data.get('title', 'Financial System')}' "
+            f"(Domain: {analysis_data.get('domain', 'Financial')}, "
+            f"Risk: {analysis_data.get('risk_level', 'MEDIUM')}). PDF generated at {pdf_path}."
+        )
     except Exception as exc:
         print(f"[ERROR] Requirements analysis failed: {exc}")
-        analysis_data = {"error": str(exc), "requirement_statement": user_text}
         REQUIREMENTS[session_id] = {
             "status": "error",
             "requirement": user_text,
-            "analysis": analysis_data
+            "analysis": {"error": str(exc), "requirement_statement": user_text},
         }
-
-    mp = str(analysis_data.get('moscow_priority', 'N/A'))
-    rl = str(analysis_data.get('risk_level', 'N/A'))
-    response_text = f"[Extraction Agent] Extracted requirements for Indian banking domain.\n- MoSCoW Priority: {mp}\n- Risk Level: {rl}\n- PDF Generated: {pdf_path}"
+        response_text = f"Requirements analysis failed: {exc}"
 
     SESSIONS[session_id]["messages"].append({"role": "assistant", "content": response_text})
-
     return {
         "response": response_text,
-        "requirements": REQUIREMENTS[session_id]
+        "requirements": REQUIREMENTS[session_id],
     }
 
 
@@ -125,33 +143,47 @@ def get_requirements(session_id: str = Path(...)):
 @app.post("/sdlc/{session_id}/recommend")
 def generate_sdlc_recommendation(session_id: str = Path(...)):
     if session_id not in REQUIREMENTS:
-        raise HTTPException(status_code=400, detail="Requirements must be created before SDLC prediction")
+        raise HTTPException(status_code=400, detail="Requirements must be created before SDLC recommendation")
 
     req_data = REQUIREMENTS[session_id]
     statement = req_data.get("requirement", "")
+    rag_ctx = (req_data.get("analysis") or {}).get("rag_context", "")
 
-    # 2. Invoke Fine-Tuned SDLC Recommendation Agent
     try:
         from agents.sdlc_agent import recommend_sdlc_structured
-        sdlc_data = recommend_sdlc_structured(statement)
-        sdlc_result = {
+        sdlc_data = recommend_sdlc_structured(statement, rag_context=rag_ctx)
+        SDLC_RECOMMENDATIONS[session_id] = {
             "status": "pending_approval",
-            "recommended_model": sdlc_data.get("recommended_model", "Agile-DevSecOps Hybrid"),
-            "reasoning": sdlc_data.get("reasoning", ""),
-            "alternatives_considered": sdlc_data.get("alternatives_considered", []),
+            **sdlc_data,
         }
-        SDLC_RECOMMENDATIONS[session_id] = sdlc_result
     except Exception as exc:
         print(f"[ERROR] SDLC recommendation failed: {exc}")
-        sdlc_result = {
+        SDLC_RECOMMENDATIONS[session_id] = {
             "status": "error",
             "recommended_model": "",
             "reasoning": str(exc),
-            "alternatives_considered": []
+            "alternatives_considered": [],
         }
-        SDLC_RECOMMENDATIONS[session_id] = sdlc_result
 
     return SDLC_RECOMMENDATIONS[session_id]
+
+
+@app.post("/sdlc/{session_id}/critique")
+def critique_sdlc_choice(session_id: str = Path(...), payload: CritiqueRequest = Body(...)):
+    if session_id not in REQUIREMENTS:
+        raise HTTPException(status_code=400, detail="Requirements not found for session")
+
+    req_data = REQUIREMENTS[session_id]
+    statement = req_data.get("requirement", "")
+    rag_ctx = (req_data.get("analysis") or {}).get("rag_context", "")
+
+    from agents.sdlc_agent import critique_human_sdlc_selection
+    return critique_human_sdlc_selection(
+        requirement=statement,
+        chosen_model=payload.chosen_model,
+        human_feedback=payload.human_feedback or "",
+        rag_context=rag_ctx,
+    )
 
 
 @app.get("/sdlc/{session_id}")
@@ -165,13 +197,13 @@ def get_sdlc(session_id: str = Path(...)):
 def approve_item(
     session_id: str = Path(...),
     item_type: str = Path(..., description="'requirements' or 'sdlc'"),
-    payload: ApprovalRequest = Body(...)
+    payload: ApprovalRequest = Body(...),
 ):
     record = {
         "session_id": session_id,
         "item_type": item_type,
         "action": payload.action,
-        "comment": payload.comment
+        "comment": payload.comment,
     }
     APPROVALS.append(record)
 

@@ -5,8 +5,11 @@ env/
 
 # Binaries & Large Runtimes
 qdrant
+qdrant_storage/
 storage/
 .qdrant-initialized
+*.db
+*.sqlite*
 
 # Python bytecode & cache
 __pycache__/

@@ -1,46 +1,70 @@
 # db/database.py
-"""PostgreSQL Database Layer with SQLAlchemy ORM.
-Handles:
-- User Authentication (email + password hashing)
-- Persistent Chat Sessions & Messages
-- Persistent Requirements & SDLC Specifications
-- Audit Trails
+"""Database Layer with SQLAlchemy ORM.
+Supports PostgreSQL when available and automatically falls back to local SQLite
+so authentication and chat session persistence work cleanly out of the box.
 """
 
-import os
-import uuid
 import hashlib
+import os
 import secrets
+import socket
 from datetime import datetime, timezone
-from typing import Optional, List, Dict, Any
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
 from sqlalchemy import (
-    create_engine, Column, Integer, String, Text, Boolean,
-    DateTime, ForeignKey
+    Boolean,
+    Column,
+    DateTime,
+    ForeignKey,
+    Integer,
+    JSON,
+    String,
+    Text,
+    create_engine,
 )
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.orm import declarative_base, sessionmaker, relationship
+from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 
 load_dotenv()
 
-# Build Connection URL from .env
-PG_USER = os.getenv("POSTGRES_USER", "agentic_user")
-PG_PASS = os.getenv("POSTGRES_PASSWORD", "AgenticPass123!")
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PG_USER = os.getenv("POSTGRES_USER", "postgres")
+PG_PASS = os.getenv("POSTGRES_PASSWORD", "postgres")
 PG_HOST = os.getenv("POSTGRES_HOST", "localhost")
-PG_PORT = os.getenv("POSTGRES_PORT", "5433")
-PG_DB = os.getenv("POSTGRES_DB", "agentic_re_sdlc")
+PG_PORT = int(os.getenv("POSTGRES_PORT", "5433"))
+PG_DB = os.getenv("POSTGRES_DB", "agentic_db")
+SQLITE_PATH = os.getenv("SQLITE_FALLBACK_PATH", str(PROJECT_ROOT / "agentic_re_sdlc.db"))
 
-DATABASE_URL = f"postgresql://{PG_USER}:{PG_PASS}@{PG_HOST}:{PG_PORT}/{PG_DB}"
 
-engine = create_engine(DATABASE_URL, pool_pre_ping=True, pool_size=10, max_overflow=20)
+def _is_port_open(host: str, port: int, timeout: float = 0.4) -> bool:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(timeout)
+    try:
+        sock.connect((host, port))
+        return True
+    except OSError:
+        return False
+    finally:
+        sock.close()
+
+
+if _is_port_open(PG_HOST, PG_PORT):
+    DATABASE_URL = f"postgresql://{PG_USER}:{PG_PASS}@{PG_HOST}:{PG_PORT}/{PG_DB}"
+    engine = create_engine(DATABASE_URL, pool_pre_ping=True, pool_size=10, max_overflow=20)
+    DB_BACKEND = "postgresql"
+else:
+    DATABASE_URL = f"sqlite:///{SQLITE_PATH}"
+    engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+    DB_BACKEND = "sqlite"
+
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
+JSONType = JSON().with_variant(JSONB(), "postgresql")
 
-# ---------------------------------------------------------------------------
-# Password Security (Salted PBKDF2-HMAC-SHA256)
-# ---------------------------------------------------------------------------
+
 def hash_password(password: str) -> str:
     salt = secrets.token_hex(16)
     key = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("utf-8"), 100000)
@@ -56,9 +80,6 @@ def verify_password(password: str, stored_hash: str) -> bool:
         return False
 
 
-# ---------------------------------------------------------------------------
-# SQLAlchemy Models
-# ---------------------------------------------------------------------------
 class User(Base):
     __tablename__ = "users"
 
@@ -66,7 +87,7 @@ class User(Base):
     email = Column(String(255), unique=True, index=True, nullable=False)
     password_hash = Column(String(255), nullable=False)
     full_name = Column(String(255), nullable=False, default="")
-    role = Column(String(100), nullable=False, default="Principal Architect")
+    role = Column(String(100), nullable=False, default="Software Architect")
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     sessions = relationship("ChatSession", back_populates="user", cascade="all, delete-orphan")
@@ -91,7 +112,7 @@ class ChatMessage(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     session_id = Column(String(64), ForeignKey("chat_sessions.id", ondelete="CASCADE"), nullable=False, index=True)
-    role = Column(String(20), nullable=False)  # "user" | "assistant"
+    role = Column(String(20), nullable=False)
     content = Column(Text, nullable=False)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
@@ -102,8 +123,8 @@ class SessionStateRecord(Base):
     __tablename__ = "session_state_records"
 
     session_id = Column(String(64), ForeignKey("chat_sessions.id", ondelete="CASCADE"), primary_key=True)
-    analysis_json = Column(JSONB, nullable=True)
-    sdlc_json = Column(JSONB, nullable=True)
+    analysis_json = Column(JSONType, nullable=True)
+    sdlc_json = Column(JSONType, nullable=True)
     requirements_approved = Column(Boolean, default=False)
     sdlc_approved = Column(Boolean, default=False)
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
@@ -111,29 +132,25 @@ class SessionStateRecord(Base):
     session = relationship("ChatSession", back_populates="state")
 
 
-# ---------------------------------------------------------------------------
-# Initialization & Seed
-# ---------------------------------------------------------------------------
 def init_db():
-    """Create all tables and seed default demo user if empty."""
+    """Create tables and seed a default demo user if not already present."""
     Base.metadata.create_all(bind=engine)
     with SessionLocal() as db:
-        admin = db.query(User).filter(User.email == "architect@bank.in").first()
-        if not admin:
-            default_user = User(
-                email="architect@bank.in",
-                password_hash=hash_password("BankPass123!"),
-                full_name="Lead FinTech Architect",
-                role="Principal Architect"
+        default_email = "architect@fintech.local"
+        existing = db.query(User).filter(User.email == default_email).first()
+        if not existing:
+            db.add(
+                User(
+                    email=default_email,
+                    password_hash=hash_password("DemoPass123!"),
+                    full_name="Lead Financial Architect",
+                    role="Principal Architect",
+                )
             )
-            db.add(default_user)
             db.commit()
 
 
-# ---------------------------------------------------------------------------
-# User Authentication API
-# ---------------------------------------------------------------------------
-def register_user(email: str, password: str, full_name: str = "", role: str = "Principal Architect") -> Dict[str, Any]:
+def register_user(email: str, password: str, full_name: str = "", role: str = "Software Architect") -> Dict[str, Any]:
     email_clean = email.strip().lower()
     if not email_clean or "@" not in email_clean:
         return {"success": False, "error": "Invalid email address format."}
@@ -149,7 +166,7 @@ def register_user(email: str, password: str, full_name: str = "", role: str = "P
             email=email_clean,
             password_hash=hash_password(password),
             full_name=full_name.strip() or email_clean.split("@")[0].title(),
-            role=role
+            role=role,
         )
         db.add(new_user)
         db.commit()
@@ -160,8 +177,8 @@ def register_user(email: str, password: str, full_name: str = "", role: str = "P
                 "id": new_user.id,
                 "email": new_user.email,
                 "full_name": new_user.full_name,
-                "role": new_user.role
-            }
+                "role": new_user.role,
+            },
         }
 
 
@@ -175,15 +192,11 @@ def authenticate_user(email: str, password: str) -> Optional[Dict[str, Any]]:
             "id": user.id,
             "email": user.email,
             "full_name": user.full_name,
-            "role": user.role
+            "role": user.role,
         }
 
 
-# ---------------------------------------------------------------------------
-# Session & Chat Persistence API
-# ---------------------------------------------------------------------------
 def get_user_chat_sessions(user_id: int) -> List[Dict[str, Any]]:
-    """Retrieve all chat sessions for the user ordered by recent activity."""
     with SessionLocal() as db:
         sessions = (
             db.query(ChatSession)
@@ -192,18 +205,17 @@ def get_user_chat_sessions(user_id: int) -> List[Dict[str, Any]]:
             .limit(25)
             .all()
         )
-        result = []
-        for s in sessions:
-            result.append({
+        return [
+            {
                 "id": s.id,
                 "title": s.title,
-                "updated_at": s.updated_at.isoformat() if s.updated_at else ""
-            })
-        return result
+                "updated_at": s.updated_at.isoformat() if s.updated_at else "",
+            }
+            for s in sessions
+        ]
 
 
 def load_chat_session(session_id: str, user_id: int) -> Optional[Dict[str, Any]]:
-    """Load complete session details including messages, analysis, and SDLC approval."""
     with SessionLocal() as db:
         session = (
             db.query(ChatSession)
@@ -213,11 +225,7 @@ def load_chat_session(session_id: str, user_id: int) -> Optional[Dict[str, Any]]
         if not session:
             return None
 
-        messages = [
-            {"role": m.role, "content": m.content}
-            for m in session.messages
-        ]
-
+        messages = [{"role": m.role, "content": m.content} for m in session.messages]
         state = session.state
         return {
             "session_id": session.id,
@@ -226,7 +234,7 @@ def load_chat_session(session_id: str, user_id: int) -> Optional[Dict[str, Any]]
             "analysis": state.analysis_json if state else None,
             "sdlc": state.sdlc_json if state else None,
             "req_approved": state.requirements_approved if state else False,
-            "sdlc_approved": state.sdlc_approved if state else False
+            "sdlc_approved": state.sdlc_approved if state else False,
         }
 
 
@@ -238,9 +246,8 @@ def save_chat_session_state(
     analysis: Optional[Dict[str, Any]] = None,
     sdlc: Optional[Dict[str, Any]] = None,
     req_approved: bool = False,
-    sdlc_approved: bool = False
+    sdlc_approved: bool = False,
 ) -> bool:
-    """Upsert session, chat messages, and workflow state in PostgreSQL."""
     now = datetime.now(timezone.utc)
     with SessionLocal() as db:
         session = db.query(ChatSession).filter(ChatSession.id == session_id).first()
@@ -250,7 +257,7 @@ def save_chat_session_state(
                 user_id=user_id,
                 title=title[:250],
                 created_at=now,
-                updated_at=now
+                updated_at=now,
             )
             db.add(session)
             db.flush()
@@ -258,17 +265,17 @@ def save_chat_session_state(
             session.title = title[:250]
             session.updated_at = now
 
-        # Synchronize messages
         db.query(ChatMessage).filter(ChatMessage.session_id == session_id).delete()
         for msg in messages:
-            db.add(ChatMessage(
-                session_id=session_id,
-                role=msg.get("role", "user"),
-                content=msg.get("content", ""),
-                created_at=now
-            ))
+            db.add(
+                ChatMessage(
+                    session_id=session_id,
+                    role=msg.get("role", "user"),
+                    content=msg.get("content", ""),
+                    created_at=now,
+                )
+            )
 
-        # Synchronize state record
         state = db.query(SessionStateRecord).filter(SessionStateRecord.session_id == session_id).first()
         if not state:
             state = SessionStateRecord(
@@ -277,7 +284,7 @@ def save_chat_session_state(
                 sdlc_json=sdlc,
                 requirements_approved=req_approved,
                 sdlc_approved=sdlc_approved,
-                updated_at=now
+                updated_at=now,
             )
             db.add(state)
         else:

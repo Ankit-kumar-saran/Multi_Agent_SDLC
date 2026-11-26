@@ -2,12 +2,12 @@ fastapi==0.112.0
 uvicorn[standard]==0.30.3
 sqlalchemy==2.0.31
 psycopg2-binary==2.9.9
-alembic==1.13.2
 python-dotenv==1.0.1
+requests>=2.31.0
 sentence-transformers==2.7.0
 qdrant-client==1.10.1
-# unsloth==2024.1.0 (removed for Python 3.12)
-peft==0.10.0
-langgraph
-langchain
-# other dependencies will be added as needed
+streamlit>=1.38.0
+reportlab>=4.0.0
+pypdf>=4.0.0
+python-docx>=1.1.0
+pandas>=2.2.0

@@ -1,379 +1,281 @@
 # agents/extraction_agent.py
-"""Extraction & Classification Agent for Regulated Financial Requirements.
-Converts user requirements and documents into comprehensive, tailored Software Requirements Specifications (SRS).
-Uses the shared 4-bit Qwen-2.5-3B model via agents.model_manager to prevent GPU OOM.
+"""Extraction, Classification & Clarification Agent for Financial Software Systems.
+Uses Google Gemini API via agents.llm_client, protected by Zero-Trust guardrails
+and sensitive-data masking, and grounded in local Qdrant RAG context.
 """
 
-import os
-import json
-import re
-import torch
-from typing import Dict, Any, List
-from agents.model_manager import get_base_model
-from guardrails.input_filter import is_safe as input_is_safe
+from typing import Any, Dict, List
+from agents.llm_client import generate_content, parse_json_safely
+from guardrails.input_filter import is_safe as input_is_safe, mask_sensitive_data
 from guardrails.output_filter import filter_output
 
 
 def extract_and_classify(dialogue: str) -> Dict[str, Any]:
-    """Extract a single structured requirement from dialogue."""
+    """Extract a single structured requirement from stakeholder dialogue."""
     if not input_is_safe(dialogue):
-        raise ValueError("Input rejected by guardrails.")
+        raise ValueError("Input rejected by security guardrails.")
 
-    tokenizer, model = get_base_model()
+    masked_dialogue, _ = mask_sensitive_data(dialogue)
 
     system_prompt = (
-        "You are the Extraction & Classification Agent for financial software systems. "
-        "Extract a structured requirement schema from the dialogue with MoSCoW prioritization. "
+        "You are a Requirements Engineering & Classification Agent for financial software systems. "
+        "Extract a structured requirement from the stakeholder input with MoSCoW prioritization, "
+        "multi-label classification, acceptance criteria, and confidence scoring. "
         "Output ONLY valid JSON."
     )
 
-    user_prompt = f"""Extract a structured requirement from this dialogue:
-"{dialogue}"
+    user_prompt = f"""Extract a structured requirement from this input:
+"{masked_dialogue[:4000]}"
 
-Output ONLY valid JSON:
+Return JSON with this exact schema:
 {{
   "req_id": "REQ-01",
-  "statement": "Clear requirement statement",
-  "categories": ["Category 1", "Category 2"],
+  "statement": "Clear, testable requirement statement",
+  "categories": ["Functional", "Security"],
   "priority": "Must Have",
-  "priority_justification": "Why this priority is required",
-  "regulatory_citations": ["Applicable regulatory guideline"],
+  "priority_justification": "Why this MoSCoW priority applies",
+  "regulatory_citations": ["Relevant regulation, standard, or policy"],
   "acceptance_criteria": "Verifiable test criteria",
-  "dependencies": ["Dependency 1", "Dependency 2"],
-  "confidence_score": 0.95
+  "dependencies": ["Dependency 1"],
+  "confidence_score": 0.92
 }}"""
 
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_prompt},
-    ]
-
-    prompt_text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-    inputs = tokenizer(prompt_text, return_tensors="pt").to("cuda")
-
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-
-    with torch.no_grad():
-        outputs = model.generate(
-            **inputs,
-            max_new_tokens=400,
-            do_sample=False,
-            repetition_penalty=1.12,
-            pad_token_id=tokenizer.eos_token_id,
-        )
-
-    response_text = tokenizer.decode(outputs[0][inputs.input_ids.shape[1]:], skip_special_tokens=True).strip()
-    allowed, cleaned, reason = filter_output(response_text)
+    raw = generate_content(
+        user_prompt=user_prompt,
+        system_prompt=system_prompt,
+        json_mode=True,
+        temperature=0.1,
+        max_output_tokens=1024,
+    )
+    allowed, cleaned, reason = filter_output(raw, preserve_json=True)
     if not allowed:
         raise ValueError(f"Output rejected by guardrails: {reason}")
 
-    # Robust JSON extraction
-    return _parse_json_safely(cleaned, fallback={
+    fallback = {
         "req_id": "REQ-01",
-        "statement": dialogue[:200],
-        "categories": ["Financial Core", "Compliance"],
+        "statement": masked_dialogue[:250],
+        "categories": ["Functional"],
         "priority": "Must Have",
-        "priority_justification": "Core financial requirement.",
-        "regulatory_citations": ["RBI Financial Regulations"],
-        "acceptance_criteria": "Passes system verification.",
-        "dependencies": ["Core Database"],
-        "confidence_score": 0.90
-    })
+        "priority_justification": "Core stakeholder requirement.",
+        "regulatory_citations": [],
+        "acceptance_criteria": "Passes functional and security verification.",
+        "dependencies": [],
+        "confidence_score": 0.75,
+    }
+    parsed = parse_json_safely(cleaned, fallback=fallback)
+    return parsed if isinstance(parsed, dict) else fallback
 
 
 def extract_system_architecture(user_input: str, rag_context: str = "") -> Dict[str, Any]:
-    """Dynamically extract comprehensive, domain-tailored software requirements specification from user input.
-    Directly generates functional and non-functional requirements specific to the requested system.
-    """
+    """Dynamically extract a complete, project-specific SRS blueprint using Gemini + RAG."""
     if not input_is_safe(user_input):
-        raise ValueError("Input rejected by guardrails.")
+        raise ValueError("Input rejected by security guardrails.")
 
-    tokenizer, model = get_base_model()
-
-    rag_section = f"\n\nApplicable Regulatory Context:\n{rag_context[:1000]}" if rag_context else ""
+    masked_input, redacted_items = mask_sensitive_data(user_input)
+    rag_section = (
+        f"\n\nRetrieved Knowledge Base & Policy Context (use and cite when relevant):\n{rag_context[:4000]}"
+        if rag_context
+        else "\n\nNote: No external RAG documents matched; ground citations in well-established financial/security standards only where genuinely applicable."
+    )
 
     system_prompt = (
-        "You are the Lead Requirements Engineer for regulated financial software in India. "
-        "Analyze the user request and generate a complete, tailored Software Requirements Specification (SRS). "
-        "Every single requirement must be specifically designed for the user's exact system. "
-        "Do NOT use generic placeholder templates. Do NOT force unrelated requirements (e.g., do not add Video KYC or Card Tokenization unless directly relevant). "
+        "You are a Principal Financial Software Requirements Architect. "
+        "Analyze the stakeholder's request and retrieved RAG evidence to generate a tailored, "
+        "accurate, and non-bloated Software Requirements Specification (SRS) strictly relevant to the user's requested financial system. "
+        "Do NOT invent unrelated features or force-fit irrelevant regulations. "
+        "Include functional requirements, non-functional requirements (security, privacy, compliance, performance, availability, auditability, integration), "
+        "risk assessment, applicable regulations/standards, technical controls, and context-aware clarification questions for ambiguities. "
         "Output ONLY valid JSON."
     )
 
-    user_prompt = f"""User Project Request:
-\"{user_input[:2000]}\"
+    user_prompt = f"""Stakeholder Project Request:
+\"\"\"{masked_input[:5000]}\"\"\"
 {rag_section}
 
-Extract a tailored Software Requirements Specification in strict JSON:
+Generate a complete, project-specific SRS specification in strict JSON matching this schema:
 {{
-  "project_title": "Specific Title for this System",
-  "domain": "Financial Domain (e.g. Algorithmic Trading / Retail Payments / Digital Lending / ATM Security)",
-  "system_summary": "Architecture summary for this specific system",
-  "moscow_priority": "Must Have",
-  "priority_justification": "Why this priority is required",
-  "applicable_regulations": ["Regulation 1 (e.g. SEBI CSCRF / RBI Digital Payment Controls / DPDP Act)", "Regulation 2"],
+  "project_title": "Concise specific title for this system",
+  "domain": "Specific financial sub-domain (e.g., Digital Lending, Payment Processing, Fraud Detection, Core Banking, Insurance Claims, Financial Analytics, KYC Onboarding)",
+  "system_summary": "2-3 sentence architectural summary tailored to this project",
+  "stakeholders": ["Primary stakeholder roles"],
+  "moscow_priority": "Must Have | Should Have | Could Have",
+  "priority_justification": "Rationale for overall baseline priority",
+  "risk_level": "CRITICAL | HIGH | MEDIUM | LOW",
+  "risk_score_pct": 75,
+  "risk_summary": "Concise risk assessment rationale based on financial impact, data sensitivity, and regulatory exposure",
+  "risk_factors": ["Specific risk factor 1", "Specific risk factor 2"],
+  "applicable_regulations": [
+    {{
+      "regulation": "Applicable regulation or standard name",
+      "relevance": "Why it applies to this specific project",
+      "statutory_citation": "Section/clause or retrieved KB document filename"
+    }}
+  ],
   "requirements": [
     {{
       "id": "REQ-01",
-      "title": "Requirement Title",
-      "category": "Core Features / Interface / Security / Integration / Resilience",
-      "description": "Precise technical specification for this feature",
-      "priority": "Must Have",
-      "regulation": "Applicable circular or rule",
-      "acceptance_criteria": "Verifiable test criteria"
+      "title": "Specific requirement title",
+      "category": "Choose appropriate category (e.g. Functional Core, Security & Privacy, Compliance & Audit, Performance & Availability, Data & Integration, User Interface & Experience)",
+      "description": "Clear, verifiable engineering specification tailored to this project",
+      "priority": "Must Have | Should Have | Could Have",
+      "regulation": "Specific standard/regulation or 'Internal Business Rule'",
+      "acceptance_criteria": "Measurable, testable verification criteria",
+      "confidence_score": 0.90
     }}
+  ],
+  "technical_controls": [
+    {{
+      "control_id": "CTRL-01",
+      "title": "Control title",
+      "specification": "Concrete technical control specification",
+      "verification": "How this control is verified/tested"
+    }}
+  ],
+  "clarification_questions": [
+    "Specific question to resolve ambiguity, missing constraint, or stakeholder conflict"
   ]
 }}
 
-Generate 12 to 18 distinct requirements tailored directly to this project across all architectural pillars (Frontend UI/UX, Backend APIs, Auth & KYC, Security, Database Residency, Resilience). Ensure each requirement has unique, measurable acceptance criteria and cites relevant statutory directives from the regulatory context. Output ONLY valid JSON."""
+Generate 12 to 18 high-value, non-redundant requirements covering both Functional and Non-Functional dimensions relevant to this specific project. Ensure every item is grounded in the request and RAG context."""
 
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_prompt},
-    ]
+    raw = generate_content(
+        user_prompt=user_prompt,
+        system_prompt=system_prompt,
+        json_mode=True,
+        temperature=0.2,
+        max_output_tokens=8192,
+        timeout=75,
+    )
 
-    prompt_text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-    inputs = tokenizer(prompt_text, return_tensors="pt").to("cuda")
-
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-
-    with torch.no_grad():
-        outputs = model.generate(
-            **inputs,
-            max_new_tokens=2200,
-            do_sample=False,
-            repetition_penalty=1.1,
-            pad_token_id=tokenizer.eos_token_id,
-        )
-
-    response_text = tokenizer.decode(outputs[0][inputs.input_ids.shape[1]:], skip_special_tokens=True).strip()
-
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-
-    allowed, cleaned, reason = filter_output(response_text)
+    allowed, cleaned, reason = filter_output(raw, preserve_json=True)
     if not allowed:
         raise ValueError(f"Output rejected by guardrails: {reason}")
 
-    # Parse JSON
-    parsed = _parse_json_safely(cleaned, fallback=None)
-    if parsed and isinstance(parsed, dict):
-        normalized = _normalize_extracted_data(parsed, user_input)
-        if normalized.get("requirements"):
-            return normalized
+    parsed = parse_json_safely(cleaned, fallback=None)
+    if isinstance(parsed, dict) and parsed.get("requirements"):
+        normalized = _normalize_extracted_data(parsed, masked_input)
+        normalized["masked_pii"] = redacted_items
+        return normalized
 
-    # If parsing failed, construct structured fallback from user input
-    return _build_fallback_architecture(user_input, rag_context)
-
-
-def _parse_json_safely(text: str, fallback: Any = None) -> Any:
-    """Robustly extract and parse JSON from LLM output, with bracket repair."""
-    start = text.find("{")
-    end = text.rfind("}")
-    if start != -1 and end != -1:
-        candidate = text[start:end+1]
-        try:
-            return json.loads(candidate)
-        except json.JSONDecodeError:
-            pass
-
-    # Try repairing truncated JSON by appending closing braces
-    if start != -1:
-        for suffix in ["]}]}", "}]}", "]}}", "}}", "}"]:
-            try:
-                candidate = text[start:] + suffix
-                return json.loads(candidate)
-            except Exception:
-                continue
-
-    return fallback
+    raise RuntimeError("LLM returned invalid or incomplete SRS JSON structure.")
 
 
 def _normalize_extracted_data(data: Dict[str, Any], user_input: str) -> Dict[str, Any]:
-    """Normalize keys (case-insensitive) and extract structured requirements from any variant output."""
-    lowered = {k.lower(): v for k, v in data.items()}
+    """Normalize LLM-returned JSON into a consistent internal schema."""
+    lowered = {str(k).lower(): v for k, v in data.items()}
 
-    # Extract requirements list from any key (requirements, functional_requirements, features, etc.)
-    req_items = (
-        lowered.get("requirements") or
-        lowered.get("functional_requirements") or
-        lowered.get("features") or
-        []
+    raw_reqs = (
+        lowered.get("requirements")
+        or lowered.get("functional_requirements")
+        or lowered.get("features")
+        or []
     )
-    if isinstance(req_items, dict):
-        flattened = []
-        for cat_k, cat_v in req_items.items():
-            if isinstance(cat_v, list):
-                for sub_item in cat_v:
-                    if isinstance(sub_item, dict):
-                        sub_item.setdefault("category", cat_k)
-                        flattened.append(sub_item)
-        req_items = flattened
-
-    norm_reqs = []
-    for idx, item in enumerate(req_items):
+    norm_reqs: List[Dict[str, Any]] = []
+    for idx, item in enumerate(raw_reqs):
         if not isinstance(item, dict):
             continue
-        i_low = {k.lower(): v for k, v in item.items()}
-        title = (
-            i_low.get("title") or
-            i_low.get("feature") or
-            i_low.get("name") or
-            f"Requirement {idx+1}"
-        )
-        desc = (
-            i_low.get("description") or
-            i_low.get("desc") or
-            i_low.get("details") or
-            i_low.get("specification") or
-            title
-        )
-        cat = (
-            i_low.get("category") or
-            i_low.get("type") or
-            "Core Features & Logic"
-        )
-        prio = i_low.get("priority") or ("Must Have" if idx < 3 else "Should Have")
-        reg = i_low.get("regulation") or "Statutory Compliance Directive"
-        crit = i_low.get("acceptance_criteria") or "Passes automated verification test suite."
+        i_low = {str(k).lower(): v for k, v in item.items()}
+        title = str(i_low.get("title") or i_low.get("name") or f"Requirement {idx + 1}").strip()
+        desc = str(i_low.get("description") or i_low.get("specification") or title).strip()
+        cat = str(i_low.get("category") or "Functional").strip()
+        prio = str(i_low.get("priority") or "Must Have").strip()
+        reg = str(i_low.get("regulation") or "Standard Engineering Practice").strip()
+        crit = str(i_low.get("acceptance_criteria") or "Passes automated verification suite.").strip()
+        conf = i_low.get("confidence_score", 0.85)
+        try:
+            conf = round(max(0.0, min(1.0, float(conf))), 2)
+        except (TypeError, ValueError):
+            conf = 0.85
 
-        norm_reqs.append({
-            "id": f"REQ-{idx+1:02d}",
-            "title": title,
-            "category": cat,
-            "description": desc,
-            "priority": prio,
-            "regulation": reg,
-            "acceptance_criteria": crit
-        })
+        norm_reqs.append(
+            {
+                "id": str(i_low.get("id") or f"REQ-{idx + 1:02d}"),
+                "title": title,
+                "category": cat,
+                "description": desc,
+                "priority": prio,
+                "regulation": reg,
+                "acceptance_criteria": crit,
+                "confidence_score": conf,
+            }
+        )
 
-    title = (
-        lowered.get("project_title") or
-        lowered.get("title") or
-        f"{user_input[:40]}... System"
-    )
-    domain = (
-        lowered.get("domain") or
-        "Indian Regulated Financial Infrastructure"
-    )
-    summary = (
-        lowered.get("system_summary") or
-        lowered.get("summary") or
-        f"Software architecture specification for {user_input[:200]}"
-    )
-    actors = (
-        lowered.get("primary_actors") or
-        lowered.get("actors") or
-        ["End User", "Operations Team", "Compliance Officer"]
-    )
-    regulations = (
-        lowered.get("applicable_regulations") or
-        lowered.get("regulations") or
-        []
-    )
-    moscow = lowered.get("moscow_priority") or "Must Have"
-    justification = (
-        lowered.get("priority_justification") or
-        lowered.get("justification") or
-        f"Critical operational and statutory compliance requirement for {domain}."
-    )
-    controls = (
-        lowered.get("technical_controls") or
-        lowered.get("controls") or
-        []
-    )
+    risk_score = lowered.get("risk_score_pct", 65)
+    try:
+        risk_score = max(0, min(100, int(float(risk_score))))
+    except (TypeError, ValueError):
+        risk_score = 65
+
+    risk_level = str(lowered.get("risk_level") or "").upper().strip()
+    if risk_level not in {"CRITICAL", "HIGH", "MEDIUM", "LOW"}:
+        if risk_score >= 85:
+            risk_level = "CRITICAL"
+        elif risk_score >= 68:
+            risk_level = "HIGH"
+        elif risk_score >= 45:
+            risk_level = "MEDIUM"
+        else:
+            risk_level = "LOW"
+
+    regulations = lowered.get("applicable_regulations") or lowered.get("regulations") or []
+    norm_regs: List[Dict[str, str]] = []
+    for r in regulations:
+        if isinstance(r, dict):
+            norm_regs.append(
+                {
+                    "regulation": str(r.get("regulation", "Applicable Standard")),
+                    "relevance": str(r.get("relevance", "Governance & compliance alignment")),
+                    "statutory_citation": str(r.get("statutory_citation", "Referenced Policy / Standard")),
+                }
+            )
+        elif isinstance(r, str) and r.strip():
+            norm_regs.append(
+                {
+                    "regulation": r.strip(),
+                    "relevance": "Applicable regulatory or policy standard",
+                    "statutory_citation": r.strip(),
+                }
+            )
+
+    controls = lowered.get("technical_controls") or []
+    norm_controls: List[Dict[str, str]] = []
+    for idx, c in enumerate(controls):
+        if isinstance(c, dict):
+            norm_controls.append(
+                {
+                    "control_id": str(c.get("control_id") or f"CTRL-{idx + 1:02d}"),
+                    "title": str(c.get("title") or f"Control {idx + 1}"),
+                    "specification": str(c.get("specification") or ""),
+                    "verification": str(c.get("verification") or "Automated test & audit verification"),
+                }
+            )
+
+    clarifications = lowered.get("clarification_questions") or []
+    if not isinstance(clarifications, list):
+        clarifications = []
+    clarifications = [str(q).strip() for q in clarifications if str(q).strip()]
+
+    risk_factors = lowered.get("risk_factors") or []
+    if not isinstance(risk_factors, list):
+        risk_factors = []
+
+    stakeholders = lowered.get("stakeholders") or ["Product Owner", "Software Architect", "Compliance Officer", "Security Team"]
+    if not isinstance(stakeholders, list):
+        stakeholders = [str(stakeholders)]
 
     return {
-        "project_title": title,
-        "domain": domain,
-        "system_summary": summary,
-        "primary_actors": actors,
-        "applicable_regulations": regulations,
-        "moscow_priority": moscow,
-        "priority_justification": justification,
+        "project_title": str(lowered.get("project_title") or f"SRS: {user_input[:50].strip()}").strip(),
+        "domain": str(lowered.get("domain") or "Financial Software Systems").strip(),
+        "system_summary": str(lowered.get("system_summary") or f"Architecture specification for {user_input[:180]}").strip(),
+        "stakeholders": [str(s) for s in stakeholders],
+        "moscow_priority": str(lowered.get("moscow_priority") or "Must Have").strip(),
+        "priority_justification": str(lowered.get("priority_justification") or "Derived from functional criticality and compliance scope.").strip(),
+        "risk_level": risk_level,
+        "risk_score_pct": risk_score,
+        "risk_summary": str(lowered.get("risk_summary") or "Evaluated from operational, security, and regulatory risk dimensions.").strip(),
+        "risk_factors": [str(f) for f in risk_factors],
+        "applicable_regulations": norm_regs,
         "requirements": norm_reqs,
-        "technical_controls": controls
-    }
-
-
-def _build_fallback_architecture(user_input: str, rag_context: str) -> Dict[str, Any]:
-    """Smart fallback that extracts meaningful requirement cards directly from user input keywords."""
-    words = user_input.strip().split()
-    title = " ".join(words[:6]).title()
-    if not title.endswith("System") and not title.endswith("Platform") and not title.endswith("Application"):
-        title += " Platform"
-
-    return {
-        "project_title": title,
-        "domain": "Indian Regulated Financial Infrastructure",
-        "system_summary": f"Technical architecture for {user_input[:200]}",
-        "primary_actors": ["End User", "Operations Team", "Compliance Officer"],
-        "applicable_regulations": [
-            {
-                "regulation": "RBI Digital Financial Security Controls",
-                "relevance": "Core regulatory security compliance",
-                "statutory_citation": "RBI Master Direction on IT Security Controls"
-            },
-            {
-                "regulation": "Digital Personal Data Protection Act, 2023",
-                "relevance": "Data protection and privacy governance",
-                "statutory_citation": "DPDP Act 2023, Sections 6 & 8"
-            }
-        ],
-        "moscow_priority": "Must Have",
-        "priority_justification": "Statutory financial compliance and operational execution mandate.",
-        "requirements": [
-            {
-                "id": "REQ-01",
-                "title": f"{title} Core Workflow Execution",
-                "category": "Core Features & Business Logic",
-                "description": f"The platform shall implement the primary operational workflow for: {user_input[:150]}.",
-                "priority": "Must Have",
-                "regulation": "RBI Information Technology Framework",
-                "acceptance_criteria": "End-to-end execution completes with 99.9% success rate and full audit logging."
-            },
-            {
-                "id": "REQ-02",
-                "title": "Secure Client Interface & Session Protection",
-                "category": "Frontend & User Interface",
-                "description": "Provide a secure, responsive user interface with multi-factor authentication and session timeouts.",
-                "priority": "Must Have",
-                "regulation": "RBI Digital Payment Security Controls Sec 4",
-                "acceptance_criteria": "Sessions automatically timeout after 15 minutes of inactivity; biometric/OTP MFA enforced."
-            },
-            {
-                "id": "REQ-03",
-                "title": "Audit Logging & Statutory Forensic Traceability",
-                "category": "Security & Compliance",
-                "description": "Maintain immutable, append-only audit trails for every transaction and administrative action.",
-                "priority": "Must Have",
-                "regulation": "CERT-In Directions & PMLA Sec 12",
-                "acceptance_criteria": "All audit logs stored in tamper-evident storage with microsecond NTP timestamps for 10 years."
-            },
-            {
-                "id": "REQ-04",
-                "title": "High Availability & Automated Disaster Recovery",
-                "category": "Resilience & Performance",
-                "description": "Deploy active-standby database replication with automated failover and sub-second transaction latency.",
-                "priority": "Should Have",
-                "regulation": "RBI Business Continuity Management Directive",
-                "acceptance_criteria": "RPO < 1 minute, RTO < 15 minutes validated during biannual failover drills."
-            }
-        ],
-        "technical_controls": [
-            {
-                "control_id": "CTRL-01",
-                "title": "Transport & Rest Encryption",
-                "specification": "TLS 1.3 in-transit and AES-256 field-level encryption at rest.",
-                "verification": "Automated security scanning and cryptographic key rotation verification."
-            },
-            {
-                "control_id": "CTRL-02",
-                "title": "Role-Based Access Control (RBAC)",
-                "specification": "Least-privilege role-based access with dual-authorization maker-checker controls.",
-                "verification": "Audit check confirming maker cannot approve own actions."
-            }
-        ]
+        "technical_controls": norm_controls,
+        "clarification_questions": clarifications,
     }
